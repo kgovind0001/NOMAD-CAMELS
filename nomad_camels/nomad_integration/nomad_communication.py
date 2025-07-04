@@ -104,11 +104,22 @@ def login_to_nomad(parent=None):
         check_response(response, "Login failed!")
         token = response.json()["access_token"]
         auth = {"Authorization": f"Bearer {token}"}
-    WarnPopup(
-        text="Successfully logged in to NOMAD!",
-        title="Login successful",
-        info_icon=True,
-    )
+
+    if len(get_user_uploads(parent=parent)) == 0:
+        create_first_upload(parent=parent)
+        WarnPopup(
+            text="Successfully logged in to NOMAD For the first time! A new upload was created automatically with name 'FirstUpload' to store your data.",
+            title="Login successful",
+            info_icon=True,
+        )
+    else:
+        WarnPopup(
+            text="Successfully logged in to NOMAD!",
+            title="Login successful",
+            info_icon=True,
+        )
+
+
     return token
 
 
@@ -357,6 +368,53 @@ def upload_file(
         )
     check_response(response, "Failed to upload to NOMAD!")
     return response
+
+
+def create_first_upload(upload_name="FirstUpload", parent=None):
+    """
+    Creates a new upload in NOMAD and sets its metadata.
+
+    Parameters
+    ----------
+    upload_name : str
+        (Default value = 'FirstUpload')
+        the name to be set for the upload
+    parent : QWidget
+        the parent widget for the login dialog of `login_to_nomad` (if needed)
+
+    Returns
+    -------
+    the upload_id of the created upload
+    """
+    ensure_login(parent)
+    
+    # Create the upload
+    head = {"accept": "application/json"}
+    head.update(auth)
+    response = requests.post(f"{nomad_url}/uploads", headers=head)
+    check_response(response, "Failed to create upload in NOMAD!")
+    
+    try:
+        response_json = response.json()
+    except ValueError as e:
+        logging.error(f"Failed to decode JSON response: {e}")
+        logging.error(f"Response content: {response.content}")
+        raise e
+    
+    upload_id = response_json.get("data", {}).get("upload_id")
+    if not upload_id:
+        raise Exception("No upload_id received from NOMAD!")
+    
+    # Set the upload metadata
+    metadata_payload = {"metadata": {"upload_name": upload_name}}
+    edit_response = requests.post(
+        f"{nomad_url}/uploads/{upload_id}/edit",
+        headers=head,
+        json=metadata_payload
+    )
+    check_response(edit_response, "Failed to set upload metadata in NOMAD!")
+    
+    return upload_id
 
 
 def get_user_information(parent=None):

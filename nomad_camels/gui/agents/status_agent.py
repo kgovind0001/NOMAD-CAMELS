@@ -72,8 +72,20 @@ class StatusAgent:
             # Determine the specific status operation
             intent = context.get('system_state', {}).get('intent', 'unknown')
             
+            # Fallback intent detection if not properly set
+            if intent == 'unknown':
+                user_lower = user_input.lower()
+                if any(word in user_lower for word in ['what', 'show', 'list']) and any(phrase in user_lower for phrase in ['device', 'instrument', 'measurement device', 'equipment']):
+                    intent = 'list_instruments'
+                elif any(word in user_lower for word in ['status', 'state', 'overview']):
+                    intent = 'get_status'
+            
+            self.logger.info(f"Processing status request with intent: {intent}")
+            
             if intent == 'get_status':
                 return self._get_system_status(user_input, parameters, context)
+            elif intent == 'list_instruments':
+                return self._list_instruments(user_input, parameters, context)
             else:
                 return self._general_status_query(user_input, parameters, context)
                 
@@ -119,6 +131,83 @@ class StatusAgent:
         except Exception as e:
             self.logger.error(f"Error getting system status: {e}")
             return f"I encountered an error while generating the status report: {str(e)}"
+    
+    def _list_instruments(self, user_input: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """List available measurement instruments and devices"""
+        
+        # Get current system state
+        system_state = context.get('system_state', {})
+        instruments = system_state.get('instruments', {})
+        
+        # Log for debugging
+        self.logger.info(f"Listing instruments. Found {len(instruments)} instruments: {list(instruments.keys())}")
+        
+        if not instruments:
+            return """🔧 **No measurement devices found.**
+
+This could be because:
+1. **No instruments have been configured yet** - Instruments need to be set up before use
+2. **The system is still initializing** - Please wait a moment and try again
+3. **Instruments are not connected** - Check physical connections and drivers
+
+**To set up instruments:**
+
+🔧 **Adding instruments:**
+- Go to **Instruments** tab in the main interface
+- Click **Add Instrument** to configure new devices
+- Select instrument type and configure connection settings
+
+🔧 **Checking connections:**
+- Verify physical connections (USB, Ethernet, Serial)
+- Ensure instrument drivers are installed
+- Test communication with instruments
+
+🔧 **Common instruments:**
+- Temperature controllers
+- Voltage sources
+- Multimeters
+- Spectrometers
+- Motors and stages
+
+📝 **Need help?** Ask me:
+- "How do I add a new instrument?"
+- "How do I test instrument connections?"
+- "What instrument types are supported?"
+
+Would you like guidance on setting up instruments?"""
+        
+        # Use the agent to format the instrument list
+        instruments_prompt = f"""
+        The user wants to see the available measurement devices/instruments:
+        "{user_input}"
+        
+        Available instruments: {instruments}
+        
+        Format this information showing:
+        1. Instrument names and types
+        2. Connection status (if available)
+        3. Key capabilities of each instrument
+        4. Any configuration details
+        
+        Present this as a clear, organized list that helps the user understand what measurement capabilities are available.
+        """
+        
+        try:
+            agent_response = self.agent.run(instruments_prompt)
+            
+            # Extract content from RunResponse object if needed
+            if hasattr(agent_response, 'content'):
+                response_text = agent_response.content
+            else:
+                response_text = str(agent_response)
+            
+            return f"🔧 **Available Measurement Devices ({len(instruments)} found):**\n\n{response_text}"
+            
+        except Exception as e:
+            self.logger.error(f"Error listing instruments: {e}")
+            # Fallback to simple listing if AI agent fails
+            instrument_list = "\n".join([f"• {name}" for name in instruments.keys()])
+            return f"🔧 **Available Measurement Devices ({len(instruments)} found):**\n\n{instrument_list}\n\nNote: Error occurred while getting detailed information: {str(e)}"
     
     def _general_status_query(self, user_input: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> str:
         """Handle general status-related queries"""

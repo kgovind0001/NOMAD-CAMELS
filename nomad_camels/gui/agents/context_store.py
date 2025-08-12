@@ -78,12 +78,15 @@ class ContextStore:
     def get_system_state(self) -> SystemState:
         """Get current system state from NOMAD-CAMELS"""
         try:
+            protocols_dict = getattr(self.main_window, 'protocols_dict', {})
+            self.logger.info(f"System state - Found {len(protocols_dict)} protocols: {list(protocols_dict.keys())}")
+            
             return SystemState(
                 active_user=getattr(self.main_window, 'active_user', 'unknown'),
                 active_sample=getattr(self.main_window, 'active_sample', 'unknown'),
                 samples=getattr(self.main_window, 'sampledata', {}),
                 users=getattr(self.main_window, 'userdata', {}),
-                protocols=getattr(self.main_window, 'protocols_dict', {}),
+                protocols=protocols_dict,
                 instruments=getattr(self.main_window, 'active_instruments', {}),
                 nomad_connected=getattr(self.main_window, 'nomad_user', None) is not None,
                 nomad_user=getattr(self.main_window, 'nomad_user', None),
@@ -175,6 +178,11 @@ class ContextStore:
             agent_memory = self.get_agent_memory(agent_name)
             shared_knowledge = self.get_shared_knowledge()
             
+            # Get the latest intent from conversation history
+            current_intent = 'unknown'
+            if conversation_history:
+                current_intent = conversation_history[-1].intent
+            
             # Create a simplified context to avoid circular references
             context = {
                 'system_state': {
@@ -185,7 +193,8 @@ class ContextStore:
                     'instruments': system_state.instruments,
                     'nomad_connected': system_state.nomad_connected,
                     'nomad_user': system_state.nomad_user,
-                    'api_server_running': system_state.api_server_running
+                    'api_server_running': system_state.api_server_running,
+                    'intent': current_intent  # Add current intent to system state
                 },
                 'agent_memory': agent_memory or {},
                 'shared_knowledge': shared_knowledge or {},
@@ -216,7 +225,8 @@ class ContextStore:
                     'instruments': {},
                     'nomad_connected': False,
                     'nomad_user': None,
-                    'api_server_running': False
+                    'api_server_running': False,
+                    'intent': 'unknown'
                 },
                 'agent_memory': {},
                 'shared_knowledge': {},
@@ -243,7 +253,26 @@ class ContextStore:
         # Protocol patterns
         protocol_patterns = [
             r'protocol\s+["\']?([^"\']+?)["\']?',
+            r'(?:measurement\s+)?protocols?\s+["\']?([^"\']+?)["\']?',
             r'run\s+(?:the\s+)?["\']?([^"\']+?)["\']?(?:\s+protocol|\s+measurement)',
+            r'(?:inspect|analyze|examine)\s+(?:the\s+)?["\']?([^"\']+?)["\']?(?:\s+protocol)?',
+        ]
+        
+        # Device and parameter patterns
+        device_patterns = [
+            r'device\s+["\']?([^"\']+?)["\']?',
+            r'instrument\s+["\']?([^"\']+?)["\']?',
+        ]
+        
+        parameter_patterns = [
+            r'(?:parameter|value|reading)\s+["\']?([^"\']+?)["\']?',
+            r'(?:pressure|temperature|voltage|current)\s+(?:of\s+)?["\']?([^"\']*?)["\']?',
+        ]
+        
+        # Condition patterns
+        condition_patterns = [
+            r'(?:until|when|if)\s+(.+?)(?:\s+(?:then|stop|halt)|$)',
+            r'(?:below|above|reaches|equals)\s+([0-9]+\.?[0-9]*(?:[eE][-+]?[0-9]+)?)',
         ]
         
         import re
@@ -269,6 +298,35 @@ class ContextStore:
                 entities['protocol_name'] = match.group(1).strip()
                 break
         
+        # Extract devices
+        for pattern in device_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                entities['device'] = match.group(1).strip()
+                break
+        
+        # Extract parameters
+        for pattern in parameter_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                entities['parameter'] = match.group(1).strip()
+                break
+        
+        # Extract conditions and thresholds
+        for pattern in condition_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                if 'until' in text.lower() or 'when' in text.lower():
+                    entities['condition'] = match.group(1).strip()
+                elif any(op in text.lower() for op in ['below', 'above', 'reaches', 'equals']):
+                    entities['threshold'] = match.group(1).strip()
+                break
+        
+        # Extract monitoring interval
+        interval_match = re.search(r'(?:every|each)\s+([0-9]+\.?[0-9]*)\s*(?:second|sec|minute|min)?', text, re.IGNORECASE)
+        if interval_match:
+            entities['interval'] = float(interval_match.group(1))
+        
         return entities
     
     def analyze_intent(self, text: str) -> str:
@@ -287,14 +345,38 @@ class ContextStore:
         
         # Protocol intents
         elif any(word in text_lower for word in ['run', 'execute', 'start']) and any(word in text_lower for word in ['protocol', 'measurement']):
-            return 'run_protocol'
-        elif any(word in text_lower for word in ['list', 'show']) and 'protocol' in text_lower:
+            # Check for conditional execution keywords
+            if any(keyword in text_lower for keyword in ['until', 'when', 'if', 'reaches', 'below', 'above']):
+                return 'conditional_execution'
+            else:
+                return 'run_protocol'
+        elif any(word in text_lower for word in ['list', 'show', 'provide']) and any(phrase in text_lower for phrase in ['protocol', 'measurement protocol', 'protocols']):
             return 'list_protocols'
+        elif any(phrase in text_lower for phrase in ['what protocols', 'which protocols', 'protocols i have', 'protocols we have', 'available protocols']):
+            return 'list_protocols'
+        elif any(word in text_lower for word in ['inspect', 'analyze', 'examine', 'describe', 'explain']) and any(phrase in text_lower for phrase in ['protocol', 'measurement protocol']):
+            return 'inspect_protocol'
+        elif any(phrase in text_lower for phrase in ['protocol', 'measurement protocol']) and any(word in text_lower for word in ['status', 'progress', 'running']):
+            return 'protocol_status'
+        
+        # Device monitoring intents
+        elif any(word in text_lower for word in ['monitor', 'watch', 'track']) and any(word in text_lower for word in ['device', 'instrument', 'pressure', 'temperature', 'value']):
+            return 'monitor_devices'
+        elif any(word in text_lower for word in ['stop', 'halt']) and 'monitor' in text_lower:
+            return 'stop_monitoring'
+        
+        # Device/Instrument queries
+        elif any(word in text_lower for word in ['what', 'show', 'list']) and any(phrase in text_lower for phrase in ['device', 'instrument', 'measurement device', 'equipment']):
+            return 'list_instruments'
+        elif any(phrase in text_lower for phrase in ['want to know', 'tell me about']) and any(phrase2 in text_lower for phrase2 in ['device', 'instrument', 'measurement device', 'equipment']):
+            return 'list_instruments'
+        elif any(phrase in text_lower for phrase in ['what can you help', 'what can you do', 'help me with']):
+            return 'get_help'
         
         # Status and information intents
         elif any(word in text_lower for word in ['status', 'state', 'overview']):
             return 'get_status'
-        elif any(word in text_lower for word in ['help', 'how', 'what']):
+        elif any(word in text_lower for word in ['help', 'how']) and not any(phrase in text_lower for phrase in ['what can you help', 'help me with']):
             return 'get_help'
         
         # Troubleshooting intents

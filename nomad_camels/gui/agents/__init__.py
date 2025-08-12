@@ -18,6 +18,7 @@ from .orchestrator import WorkflowOrchestrator
 from .context_store import ContextStore
 from .sample_manager import SampleManagerAgent
 from .protocol_agent import ProtocolAgent
+from .measurement_control_agent import MeasurementControlAgent
 from .status_agent import StatusAgent
 from .troubleshoot_agent import TroubleshootAgent
 from .nomad_agent import NomadAgent
@@ -26,7 +27,8 @@ __all__ = [
     'WorkflowOrchestrator',
     'ContextStore',
     'SampleManagerAgent',
-    'ProtocolAgent', 
+    'ProtocolAgent',
+    'MeasurementControlAgent',
     'StatusAgent',
     'TroubleshootAgent',
     'NomadAgent'

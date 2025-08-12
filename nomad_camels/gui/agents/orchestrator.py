@@ -60,6 +60,7 @@ class WorkflowOrchestrator:
             Available specialized agents:
             - SampleManagerAgent: Handles sample creation, editing, deletion
             - ProtocolAgent: Manages protocol execution and configuration
+            - MeasurementControlAgent: Advanced protocol inspection and conditional execution
             - StatusAgent: Provides system status and information
             - TroubleshootAgent: Helps with problems and errors
             - NomadAgent: Handles NOMAD integration and uploads
@@ -74,6 +75,7 @@ class WorkflowOrchestrator:
         # Import agents here to avoid circular imports
         from .sample_manager import SampleManagerAgent
         from .protocol_agent import ProtocolAgent
+        from .measurement_control_agent import MeasurementControlAgent
         from .status_agent import StatusAgent
         from .troubleshoot_agent import TroubleshootAgent
         from .nomad_agent import NomadAgent
@@ -81,6 +83,7 @@ class WorkflowOrchestrator:
         self.agents = {
             'sample_manager': SampleManagerAgent(self.main_window, self.context_store),
             'protocol': ProtocolAgent(self.main_window, self.context_store),
+            'measurement_control': MeasurementControlAgent(self.main_window, self.context_store),
             'status': StatusAgent(self.main_window, self.context_store),
             'troubleshoot': TroubleshootAgent(self.main_window, self.context_store),
             'nomad': NomadAgent(self.main_window, self.context_store)
@@ -134,9 +137,25 @@ class WorkflowOrchestrator:
     def _analyze_request(self, user_input: str, context: ConversationContext, system_state) -> Dict[str, Any]:
         """Analyze the user request and create a workflow plan"""
         
+        self.logger.info(f"Analyzing request with intent: {context.intent}")
+        
         # For general queries and greetings, use fallback directly
         if context.intent in ['general_query', 'get_help']:
-            return self._fallback_workflow_plan(context.intent, context.entities)
+            plan = self._fallback_workflow_plan(context.intent, context.entities)
+            self.logger.info(f"Using fallback plan for {context.intent}: {plan}")
+            return plan
+        
+        # For protocol-related intents, use fallback directly to avoid GPT-4 analysis override
+        if context.intent in ['list_protocols', 'inspect_protocol', 'run_protocol', 'conditional_execution', 'monitor_devices', 'stop_monitoring', 'protocol_status']:
+            plan = self._fallback_workflow_plan(context.intent, context.entities)
+            self.logger.info(f"Using fallback plan for protocol intent {context.intent}: {plan}")
+            return plan
+        
+        # For instrument/device and status queries, use fallback directly
+        if context.intent in ['list_instruments', 'get_status']:
+            plan = self._fallback_workflow_plan(context.intent, context.entities)
+            self.logger.info(f"Using fallback plan for {context.intent}: {plan}")
+            return plan
         
         # Create analysis prompt
         analysis_prompt = f"""
@@ -156,19 +175,27 @@ class WorkflowOrchestrator:
         
         Available agents (use EXACT names in response):
         - sample_manager: Handles sample creation, editing, deletion
-        - protocol: Manages protocol execution and configuration
+        - protocol: Manages protocol execution and configuration  
+        - measurement_control: Advanced protocol inspection, conditional execution, device monitoring
         - status: Provides system status and information
         - troubleshoot: Helps with problems and errors
         - nomad: Handles NOMAD integration and uploads
         
         IMPORTANT: Use only these exact agent names in your response:
-        sample_manager, protocol, status, troubleshoot, nomad
+        sample_manager, protocol, measurement_control, status, troubleshoot, nomad
         
         Based on the detected intent "{context.intent}", determine:
         1. Which specialized agents are needed from the available agents (use exact names)
         2. The execution order/workflow
         3. Any parameters or data needed
         4. Expected complexity (simple, medium, complex)
+        
+        Special cases:
+        - For protocol inspection, analysis, or detailed protocol info: use measurement_control
+        - For conditional execution ("run until X reaches Y"): use measurement_control
+        - For device monitoring: use measurement_control
+        - For simple protocol runs: use protocol
+        - For protocol listing: use protocol
         
         Respond with a JSON object containing:
         {{
@@ -224,6 +251,62 @@ class WorkflowOrchestrator:
                 'parameters': entities,
                 'complexity': 'medium',
                 'estimated_steps': 2
+            },
+            'list_protocols': {
+                'agents_needed': ['protocol'],
+                'workflow_type': 'simple',
+                'primary_agent': 'protocol',
+                'parameters': entities,
+                'complexity': 'simple',
+                'estimated_steps': 1
+            },
+            'inspect_protocol': {
+                'agents_needed': ['measurement_control'],
+                'workflow_type': 'simple',
+                'primary_agent': 'measurement_control',
+                'parameters': entities,
+                'complexity': 'medium',
+                'estimated_steps': 1
+            },
+            'conditional_execution': {
+                'agents_needed': ['measurement_control'],
+                'workflow_type': 'simple',
+                'primary_agent': 'measurement_control',
+                'parameters': entities,
+                'complexity': 'complex',
+                'estimated_steps': 3
+            },
+            'monitor_devices': {
+                'agents_needed': ['measurement_control'],
+                'workflow_type': 'simple',
+                'primary_agent': 'measurement_control',
+                'parameters': entities,
+                'complexity': 'medium',
+                'estimated_steps': 2
+            },
+            'stop_monitoring': {
+                'agents_needed': ['measurement_control'],
+                'workflow_type': 'simple',
+                'primary_agent': 'measurement_control',
+                'parameters': entities,
+                'complexity': 'simple',
+                'estimated_steps': 1
+            },
+            'protocol_status': {
+                'agents_needed': ['protocol'],
+                'workflow_type': 'simple',
+                'primary_agent': 'protocol',
+                'parameters': entities,
+                'complexity': 'simple',
+                'estimated_steps': 1
+            },
+            'list_instruments': {
+                'agents_needed': ['status'],
+                'workflow_type': 'simple',
+                'primary_agent': 'status',
+                'parameters': entities,
+                'complexity': 'simple',
+                'estimated_steps': 1
             },
             'get_status': {
                 'agents_needed': ['status'],
@@ -283,6 +366,9 @@ class WorkflowOrchestrator:
         agents_needed = workflow_plan.get('agents_needed', [])
         primary_agent = workflow_plan.get('primary_agent')
         parameters = workflow_plan.get('parameters', {})
+        
+        # Log workflow execution details
+        self.logger.info(f"Executing workflow: type={workflow_type}, primary_agent={primary_agent}, agents_needed={agents_needed}")
         
         try:
             if workflow_type == 'simple':
@@ -382,6 +468,11 @@ class WorkflowOrchestrator:
     def _execute_conversational_workflow(self, user_input: str, parameters: Dict[str, Any], context: ConversationContext) -> str:
         """Execute a conversational workflow for general queries and greetings"""
         
+        # Check if this is a help request
+        user_lower = user_input.lower()
+        if any(phrase in user_lower for phrase in ['what can you help', 'what can you do', 'help me with']):
+            return self._provide_help_response()
+        
         # Create a conversational prompt for the orchestrator
         conversational_prompt = f"""
         The user said: "{user_input}"
@@ -414,9 +505,58 @@ class WorkflowOrchestrator:
             if user_lower in ['hi', 'hello', 'hey', 'hi there', 'hello there']:
                 return "Hello! I'm your NOMAD-CAMELS assistant. How can I help you today? I can help with sample management, running protocols, system status, troubleshooting, or NOMAD integration."
             elif user_lower in ['help', 'what can you do', 'what can you help with']:
-                return "I can help you with:\n• Sample management (create, edit, delete samples)\n• Protocol execution and management\n• System status and monitoring\n• Troubleshooting issues\n• NOMAD integration and uploads\n\nWhat would you like to do?"
+                return self._provide_help_response()
             else:
                 return "I'm here to help with your NOMAD-CAMELS system. Could you please be more specific about what you need assistance with?"
+    
+    def _provide_help_response(self) -> str:
+        """Provide comprehensive help information"""
+        return """🤖 **NOMAD-CAMELS AI Assistant - Help**
+
+I can help you with many aspects of your measurement automation system:
+
+📋 **Sample Management:**
+- "Create a new sample called [name]"
+- "List all samples"
+- "Edit sample information"
+- "Delete old samples"
+
+🔬 **Protocol Operations:**
+- "List all measurement protocols"
+- "Inspect the [protocol name] protocol"
+- "Run [protocol name]"
+- "Run [protocol] until [condition]" (conditional execution)
+
+🔧 **Instrument Management:**
+- "List all measurement devices"
+- "Show instrument status"
+- "What instruments do we have?"
+
+📊 **System Status:**
+- "What's the system status?"
+- "Show current measurements"
+- "Check NOMAD connection"
+
+🎯 **Advanced Features:**
+- "Monitor [device] every [X] seconds"
+- "Stop monitoring"
+- "Run [protocol] until pressure reaches [value]"
+
+🌐 **NOMAD Integration:**
+- "Upload data to NOMAD"
+- "Connect to NOMAD"
+- "Check NOMAD status"
+
+❓ **Troubleshooting:**
+- "Why is [something] not working?"
+- "Help with [specific issue]"
+
+💡 **Tips:**
+- Be specific about what you want to do
+- Use natural language - I understand context
+- Ask follow-up questions for clarification
+
+What would you like to help with?"""
     
     def _combine_responses(self, responses: List[str], user_input: str) -> str:
         """Combine responses from multiple agents into a coherent answer"""

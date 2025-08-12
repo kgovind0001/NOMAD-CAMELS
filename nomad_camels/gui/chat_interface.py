@@ -104,30 +104,106 @@ class APIKeyDialog(QDialog):
 
 
 class ChatWorker(QThread):
-    """Worker thread for OpenAI API calls"""
+    """Worker thread for AI agent calls using the orchestrator"""
     
     message_received = Signal(str)
     error_occurred = Signal(str)
     action_requested = Signal(str, dict)  # action_type, parameters
     
-    def __init__(self, api_key: str, message: str, chat_history: list):
+    def __init__(self, main_window, message: str, chat_history: list):
         super().__init__()
-        self.api_key = api_key
+        self.main_window = main_window
         self.message = message
         self.chat_history = chat_history
         
     def run(self):
         try:
+            # Log the user message for debugging
+            print(f"[Chat Debug] User message: {self.message}")
+            
+            # Use the orchestrator instead of direct OpenAI calls
+            try:
+                from gui.agents.orchestrator import WorkflowOrchestrator
+                
+                # Check if orchestrator already exists
+                if not hasattr(self.main_window, '_ai_orchestrator'):
+                    print("[Chat Debug] Initializing WorkflowOrchestrator...")
+                    self.main_window._ai_orchestrator = WorkflowOrchestrator(self.main_window)
+                    print("[Chat Debug] WorkflowOrchestrator initialized successfully")
+                
+                orchestrator = self.main_window._ai_orchestrator
+                
+                # Process the request through the orchestrator
+                print(f"[Chat Debug] Processing request through orchestrator...")
+                response = orchestrator.process_user_request(self.message, "chat_session")
+                
+                # Log the AI response for debugging
+                print(f"[Chat Debug] AI response: {response}")
+                
+                # Check if response contains an action (legacy format support)
+                if response.startswith("ACTION:"):
+                    parts = response.split(":", 2)
+                    if len(parts) >= 3:
+                        action_type = parts[1]
+                        try:
+                            parameters = json.loads(parts[2])
+                            self.action_requested.emit(action_type, parameters)
+                            # Also send a user-friendly message
+                            self.message_received.emit("I'll help you with that now...")
+                        except json.JSONDecodeError as e:
+                            self.message_received.emit(f"I tried to perform an action but there was an error parsing the request: {e}. Here's what I wanted to do: {response}")
+                    else:
+                        self.message_received.emit(f"I tried to perform an action but the format was incomplete: {response}")
+                else:
+                    # Check if the reply contains action-like content but doesn't start with ACTION:
+                    if "add_sample" in response.lower() and "{" in response and "}" in response:
+                        # Try to extract JSON from the reply
+                        import re
+                        json_match = re.search(r'\{[^}]+\}', response)
+                        if json_match:
+                            try:
+                                parameters = json.loads(json_match.group())
+                                self.action_requested.emit("add_sample", parameters)
+                                self.message_received.emit("I'll help you add that sample now...")
+                            except json.JSONDecodeError:
+                                self.message_received.emit(response)
+                        else:
+                            self.message_received.emit(response)
+                    else:
+                        self.message_received.emit(response)
+                        
+            except ImportError as import_error:
+                print(f"[Chat Debug] Failed to import orchestrator: {import_error}")
+                self.error_occurred.emit(f"AI system not available: {import_error}. Please check installation.")
+            except Exception as orchestrator_error:
+                # Fallback to old OpenAI system if orchestrator fails
+                print(f"[Chat Debug] Orchestrator failed, falling back to OpenAI: {orchestrator_error}")
+                import traceback
+                traceback.print_exc()
+                self._fallback_openai_call()
+                
+        except Exception as e:
+            self.error_occurred.emit(f"Error communicating with AI system: {str(e)}")
+    
+    def _fallback_openai_call(self):
+        """Fallback to the original OpenAI implementation"""
+        try:
             if not OPENAI_AVAILABLE:
-                self.error_occurred.emit("OpenAI library not installed. Please install it with: pip install openai")
+                self.error_occurred.emit("AI agent system unavailable and OpenAI library not installed. Please install it with: pip install openai")
+                return
+            
+            # Get API key from main window
+            api_key = ""
+            if hasattr(self.main_window, 'preferences') and 'openai_api_key' in self.main_window.preferences:
+                api_key = self.main_window.preferences['openai_api_key']
+            
+            if not api_key:
+                self.error_occurred.emit("AI agent system unavailable and no OpenAI API key configured. Please configure API key or contact support.")
                 return
             
             # Configure OpenAI client
             from openai import OpenAI
-            client = OpenAI(api_key=self.api_key)
-            
-            # Log the user message for debugging
-            print(f"[Chat Debug] User message: {self.message}")
+            client = OpenAI(api_key=api_key)
             
             # Prepare system prompt
             system_prompt = """You are an AI assistant for NOMAD-CAMELS, a configurable measurement software for experimental solid-state physics. 
@@ -181,7 +257,7 @@ Always be helpful and create samples immediately when you have enough informatio
             reply = response.choices[0].message.content.strip()
             
             # Log the AI response for debugging
-            print(f"[Chat Debug] AI response: {reply}")
+            print(f"[Chat Debug] Fallback AI response: {reply}")
             
             # Check if response contains an action
             if reply.startswith("ACTION:"):
@@ -214,9 +290,9 @@ Always be helpful and create samples immediately when you have enough informatio
                         self.message_received.emit(reply)
                 else:
                     self.message_received.emit(reply)
-                
+                    
         except Exception as e:
-            self.error_occurred.emit(f"Error communicating with OpenAI: {str(e)}")
+            self.error_occurred.emit(f"Error in fallback OpenAI system: {str(e)}")
 
 
 class ChatWindow(QMainWindow):
@@ -270,7 +346,7 @@ class ChatInterface(QWidget):
         header_layout.addStretch()
         
         # API Key button
-        self.api_key_button = QPushButton("Configure API Key")
+        self.api_key_button = QPushButton("OpenAI Key (Optional)")
         self.api_key_button.setStyleSheet("""
             QPushButton {
                 background-color: #007ACC;
@@ -307,7 +383,7 @@ class ChatInterface(QWidget):
         input_layout = QHBoxLayout()
         
         self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Type your message here... (e.g., 'I want to add a new sample')")
+        self.message_input.setPlaceholderText("Ask me anything... (e.g., 'List protocols', 'What devices do we have?', 'Add new sample')")
         self.message_input.setStyleSheet("""
             QLineEdit {
                 padding: 8px;
@@ -342,7 +418,7 @@ class ChatInterface(QWidget):
         layout.addLayout(input_layout)
         
         # Status label
-        self.status_label = QLabel("Ready. Configure your OpenAI API key to start chatting.")
+        self.status_label = QLabel("Ready. AI agent system active!")
         self.status_label.setStyleSheet("color: #666; font-size: 12px;")
         layout.addWidget(self.status_label)
         
@@ -350,18 +426,32 @@ class ChatInterface(QWidget):
         
         # Add welcome message
         self.add_message("Hello! I'm your NOMAD-CAMELS AI assistant. I can help you with:\n\n"
+                        "📋 **Sample Management:**\n"
                         "• Adding new samples\n"
-                        "• Managing measurement protocols\n"
-                        "• Understanding NOMAD-CAMELS features\n"
-                        "• Troubleshooting issues\n\n"
-                        "Try saying: 'I want to add a new sample'", False)
+                        "• Managing sample information\n\n"
+                        "🔬 **Protocol Operations:**\n"
+                        "• List all measurement protocols\n"
+                        "• Inspect protocol details\n"
+                        "• Run protocols with conditions\n\n"
+                        "🔧 **Instrument Management:**\n"
+                        "• List measurement devices\n"
+                        "• Check instrument status\n\n"
+                        "🎯 **Advanced Features:**\n"
+                        "• Device monitoring\n"
+                        "• Conditional execution\n"
+                        "• System status\n\n"
+                        "Try asking: 'What protocols do I have?' or 'List all measurement devices'", False)
         
     def load_api_key(self):
         """Load API key from preferences"""
         if hasattr(self.main_window, 'preferences') and 'openai_api_key' in self.main_window.preferences:
             self.api_key = self.main_window.preferences['openai_api_key']
             if self.api_key:
-                self.status_label.setText("API key configured. Ready to chat!")
+                self.status_label.setText("AI system active with OpenAI fallback!")
+            else:
+                self.status_label.setText("AI system active! (OpenAI API key optional)")
+        else:
+            self.status_label.setText("AI system active! (OpenAI API key optional)")
                 
     def configure_api_key(self):
         """Open API key configuration dialog"""
@@ -376,7 +466,7 @@ class ChatInterface(QWidget):
                         self.main_window.preferences['openai_api_key'] = api_key
                         from nomad_camels.utility import load_save_functions
                         load_save_functions.save_preferences(self.main_window.preferences)
-                self.status_label.setText("API key configured successfully!")
+                self.status_label.setText("AI system active with OpenAI fallback!")
             else:
                 QMessageBox.warning(self, "Invalid API Key", "Please enter a valid OpenAI API key.")
                 
@@ -402,18 +492,7 @@ class ChatInterface(QWidget):
         message = self.message_input.text().strip()
         if not message:
             return
-            
-        if not self.api_key:
-            QMessageBox.warning(self, "API Key Required", 
-                              "Please configure your OpenAI API key first.")
-            self.configure_api_key()
-            return
-            
-        if not OPENAI_AVAILABLE:
-            QMessageBox.warning(self, "OpenAI Not Available", 
-                              "OpenAI library is not installed. Please install it with:\npip install openai")
-            return
-            
+        
         # Add user message
         self.add_message(message, True)
         self.message_input.clear()
@@ -423,8 +502,8 @@ class ChatInterface(QWidget):
         self.send_button.setEnabled(False)
         self.status_label.setText("AI is thinking...")
         
-        # Start worker thread
-        self.worker = ChatWorker(self.api_key, message, self.chat_history)
+        # Start worker thread (no API key required for orchestrator)
+        self.worker = ChatWorker(self.main_window, message, self.chat_history)
         self.worker.message_received.connect(self.on_message_received)
         self.worker.error_occurred.connect(self.on_error)
         self.worker.action_requested.connect(self.on_action_requested)
@@ -522,7 +601,7 @@ class ChatInterface(QWidget):
         """Handle worker thread completion"""
         self.message_input.setEnabled(True)
         self.send_button.setEnabled(True)
-        self.status_label.setText("Ready to chat!")
+        self.status_label.setText("Ready for next message!")
         
         if self.worker:
             self.worker.deleteLater()

@@ -19,3 +19,5 @@ nomad_camels/api/api_testing.py
 .tox/
 .coverage
 poetry.lock
+.env 
+.env.local 
